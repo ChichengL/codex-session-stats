@@ -16,11 +16,20 @@
 
 ## 安装
 
-从 [GitHub Releases](https://github.com/ChichengL/codex-session-stats/releases) 下载 `CodexSessionStats-macOS-版本号.zip`，完整解压后运行 `安装.command`。已安装原版或内部版 codex-usage-badge 时，先使用原插件的卸载入口移除它。
+可以把下面这段发给有本机终端权限的 AI 助手，让它完成下载、校验、安装和诊断：
 
-安装完成后，结束正在运行的任务，再按 `⌘Q` 完全退出客户端。从原来的应用图标打开。`诊断.command` 查看连接和各输入区状态；`卸载.command` 移除本扩展。
+```text
+请帮我在这台 Mac 上安装 Codex Session Stats：
+https://github.com/ChichengL/codex-session-stats
+先阅读 README 和 docs/macos.md，按“AI 安装”步骤操作。
+使用 Releases 的 macOS 安装包，校验 SHA-256 后安装，并检查旧版插件冲突。
+需要完全退出 Codex 时，请先提醒我结束正在运行的任务。
+安装后运行诊断，报告后台、主窗口连接和各输入区的统计状态。
+```
 
-安装器需要 Node.js 24+，会优先使用客户端自带的运行环境。普通安装无需 Python 或编译工具。详细步骤、自定义应用位置及故障处理见 [macOS 安装](docs/macos.md)。
+AI 的命令和验收要求见 [AI 安装](docs/macos.md#ai-安装)。也可以从 [GitHub Releases](https://github.com/ChichengL/codex-session-stats/releases) 下载 `CodexSessionStats-macOS-版本号.zip`，完整解压后运行 `安装.command`，详见 [安装步骤](docs/macos.md#安装步骤)。已安装原版或内部版 codex-usage-badge 时，先使用原插件的卸载入口移除它。
+
+安装器需要 Node.js 24+，会优先使用客户端自带的运行环境。普通安装无需 Python 或编译工具。客户端重开、诊断、卸载和自定义应用位置见 [macOS 安装](docs/macos.md)。
 
 ## 开发与发布
 

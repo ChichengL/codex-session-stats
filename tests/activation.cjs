@@ -1,0 +1,20 @@
+const assert=require('node:assert/strict');
+const {activationConfig,waitForExit}=require('../manage.cjs');
+(async()=>{
+  const config=activationConfig({waitForExit:true});
+  assert.equal(config.KeepAlive,false);
+  assert.equal(config.RunAtLoad,true);
+  assert.ok(config.ProgramArguments.includes('activate-after-exit'));
+  assert.ok(!config.ProgramArguments.includes('--allow-restart'));
+  let clock=0;
+  await waitForExit({isRunning:()=>clock<20000,sleep:async ms=>clock+=ms,now:()=>clock,timeoutMs:60000});
+  assert.ok(clock>=20500,'must allow shutdown to take longer than the old 10 second limit');
+  clock=0;
+  await assert.rejects(waitForExit({isRunning:()=>true,sleep:async ms=>clock+=ms,now:()=>clock,timeoutMs:2000}),/等待退出已结束/);
+  assert.equal(clock,2000);
+  clock=0;
+  let calls=0;
+  await waitForExit({isRunning:()=>++calls===2,sleep:async ms=>clock+=ms,now:()=>clock,timeoutMs:5000});
+  assert.ok(calls>=4,'a transient process gap must not trigger a second launch');
+  console.log('PASS delayed shutdown, bounded timeout, stable exit and single-run waiting configuration');
+})().catch(error=>{console.error(error);process.exitCode=1});

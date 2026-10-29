@@ -1,5 +1,5 @@
 function installThreadMetrics() {
-  const KEY = '__codexThreadMetrics', VERSION = 7;
+  const KEY = '__codexThreadMetrics', VERSION = 8;
   if (window[KEY]?.version === VERSION) { window[KEY].refresh(); return; }
   window[KEY]?.destroy?.();
   const style = document.createElement('style'); style.id = 'codex-thread-metrics-style';
@@ -23,7 +23,7 @@ function installThreadMetrics() {
     [data-codex-thread-metrics-popover] progress::-webkit-progress-value{background:#4b91ff;border-radius:4px}
   `;
   const cache = new Map(), views = new Map();
-  let disposed = false, timer = null, serial = 0, lastOpened = null;
+  let disposed = false, timer = null, serial = 0, lastOpened = null, managerFamily = null, managerLoadStarted = false;
   function remember(value) {
     cache.delete(value.id); cache.set(value.id, value);
     if (cache.size > 16) cache.delete(cache.keys().next().value);
@@ -47,6 +47,54 @@ function installThreadMetrics() {
   function visibleComposers() {
     return [...document.querySelectorAll('[data-composer-surface-variant]')].filter(element =>
       element.querySelector('[contenteditable="true"][role="textbox"],textarea') && !element.closest('[hidden],[inert],[aria-hidden="true"]') && element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0);
+  }
+  function clientScopes(composer) {
+    const keys = Object.keys(composer).filter(key => key.startsWith('__reactFiber$'));
+    if (keys.length !== 1) return null;
+    let fiber = composer[keys[0]];
+    // shortcut: 新版客户端通过 React scope 缓存暴露身份；布局或私有导出改变时需重新适配。
+    for (let depth = 0; fiber && depth < 160; depth++, fiber = fiber.return) {
+      const scopes = fiber.memoizedProps?.value;
+      if (scopes instanceof Map && scopes.size <= 16 && [...scopes.values()].some(entry => entry?.token && entry?.store && entry?.familyBindings instanceof Map)) return scopes;
+    }
+    return null;
+  }
+  function clientScope(scopes, id, placement) {
+    if (!scopes) return null;
+    const matches = [...scopes.values()].filter(entry => entry?.value?.kind === 'local' && entry.value.conversationId === id && entry.value.placement === placement);
+    return matches.length === 1 ? matches[0] : null;
+  }
+  function matchesPrimary(composer, id) {
+    if (primaryId() === id) return true;
+    const active = [...document.querySelectorAll(`${ROW}[data-app-action-sidebar-thread-active="true"]`)];
+    if (!active.length) return false;
+    const clients = active.map(row => row.getAttribute('data-app-action-sidebar-thread-host-id') === 'local' && row.getAttribute('data-app-action-sidebar-thread-kind') === 'local' ?
+      /^local:(client-new-thread:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/i.exec(row.getAttribute('data-app-action-sidebar-thread-id') ?? '')?.[1] : null);
+    if (!clients[0] || !clients.every(client => client === clients[0])) return false;
+    return clientScope(clientScopes(composer), id, 'main')?.value.clientThreadId === clients[0];
+  }
+  function loadClientManager() {
+    if (managerLoadStarted || managerFamily) return;
+    const assets = [...new Set([...document.querySelectorAll('link[rel="modulepreload"][href]')].map(link => link.href))].filter(href => {
+      const url = new URL(href);
+      return url.protocol === location.protocol && url.host === location.host && /^\/assets\/app-initial-[a-f0-9]+\.js$/.test(url.pathname) && !url.search && !url.hash;
+    });
+    if (assets.length !== 1) return;
+    managerLoadStarted = true;
+    import(assets[0]).then(module => {
+      if (disposed || module.cCn?.kind !== 'signal-family' || !module.cCn.scope) return;
+      managerFamily = module.cCn; refresh();
+    }).catch(() => {});
+  }
+  function cachedManager(composer, id) {
+    if (!managerFamily) return null;
+    const scopes = clientScopes(composer);
+    if (!clientScope(scopes, id, 'side')) return null;
+    const roots = [...scopes.values()].filter(entry => entry.token === managerFamily.scope);
+    if (roots.length !== 1) return null;
+    // 仅取已存在的 local member，不创建 signal 或 RPC 订阅。
+    const member = roots[0].familyBindings.get(managerFamily)?.get('local')?.value;
+    return typeof member?.get === 'function' ? member.get() : null;
   }
   function composerBinding(composer) {
     try {
@@ -72,12 +120,13 @@ function installThreadMetrics() {
       if (pane) {
         const tab = pane.getAttribute('data-tab-id') ?? '';
         if (pane.getAttribute('data-app-shell-tab-panel-controller') !== 'right' || tab !== 'sidechat:' + id) return null;
-        const record = owner.manager?.getConversation?.(id);
+        const manager = owner.manager ?? cachedManager(composer, id);
+        const record = manager?.getConversation?.(id);
         if (record?.id !== id || record.hostId !== 'local' || record.sideConversation !== true) return null;
         if (record.ephemeral === false) return { id, source: 'log' };
         return record.ephemeral === true ? { id, source: 'client-memory', snapshot: memorySnapshot(record, id) } : null;
       }
-      return composer.closest('[data-app-shell-focus-area="main"]') && primaryId() === id ? { id, source: 'log' } : null;
+      return composer.closest('[data-app-shell-focus-area="main"]') && matchesPrimary(composer, id) ? { id, source: 'log' } : null;
     } catch { return null; }
   }
   function memorySnapshot(record, id) {
@@ -280,6 +329,7 @@ function installThreadMetrics() {
   function refresh() {
     if (disposed) return;
     if (!window.__codexThreadTokens) { window[KEY]?.destroy(); return; }
+    loadClientManager();
     const composers = visibleComposers(), live = new Set(composers);
     for (const [target, view] of views) if (!live.has(target)) { view.destroy(); views.delete(target); }
     for (const target of composers) {
@@ -332,4 +382,5 @@ function installThreadMetrics() {
     }
   };
   refresh();
+
 }

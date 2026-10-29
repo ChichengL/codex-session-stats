@@ -10,7 +10,9 @@ ${ids.map((id, n) => `<div data-app-action-sidebar-thread-row data-app-action-si
   const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || undefined });
   try {
     const page = await browser.newPage({ viewport: { width: 1540, height: 700 } }), errors = [];
-    page.on('pageerror', error => errors.push(error.message)); await page.setContent(fixture);
+    page.on('pageerror', error => errors.push(error.message));
+    await page.route('http://codex.test/', route => route.fulfill({ contentType: 'text/html', body: fixture }));
+    await page.goto('http://codex.test/');
     await page.evaluate(ids => {
       window.__codexThreadTokens = {};
       window.fixtureRecord = id => {
@@ -174,7 +176,109 @@ ${ids.map((id, n) => `<div data-app-action-sidebar-thread-row data-app-action-si
     assert.equal(await rows('right').count(), 1);
     await page.evaluate(() => window.__codexThreadMetrics.destroy());
     assert.equal(await page.locator('[data-codex-thread-metrics],[data-codex-thread-metrics-popover],#codex-thread-metrics-style').count(), 0);
+    let releaseModule;
+    const moduleReady = new Promise(resolve => { releaseModule = resolve; });
+    await page.route('http://codex.test/assets/app-initial-abc123.js', async route => {
+      await moduleReady;
+      await route.fulfill({ contentType: 'application/javascript', body: 'export const cCn=window.fixtureFamily; window.fixtureModuleLoaded=1;' });
+    });
+    await page.evaluate(ids => {
+      const forbidden = () => { throw new Error('Must not create signals, subscribe, write state or read business content'); };
+      window.fixtureFamily = { kind: 'signal-family', scope: {}, resolve: forbidden, read: forbidden };
+      window.fixtureManagerReads = 0;
+      window.fixtureMember = { value: { get() { window.fixtureManagerReads++; return { getConversation: id => window.fixtureRecords.get(id) }; }, set: forbidden, subscribe: forbidden } };
+      window.fixtureRoot = { token: window.fixtureFamily.scope, store: { get: forbidden, set: forbidden, sub: forbidden }, familyBindings: new Map([[window.fixtureFamily, new Map([['local', window.fixtureMember]])]]), value: {} };
+      window.fixtureMainRow = document.querySelector('[data-app-action-sidebar-thread-active="true"]');
+      window.fixtureCurrentBind = (side, id) => {
+        const composer = document.querySelector('#' + side + ' [data-composer-surface-variant]');
+        composer.parentElement.__reactProps$fixture = { children: [{ props: { conversationId: id, hostId: 'local' } }, { props: { conversationId: id } }] };
+        const clientThreadId = 'client-new-thread:' + id;
+        const scope = { token: {}, store: window.fixtureRoot.store, familyBindings: new Map(), value: { kind: 'local', placement: side === 'left' ? 'main' : 'side', conversationId: id, clientThreadId } };
+        const scopes = new Map([['root', window.fixtureRoot], ['composer', scope]]);
+        let fiber = { memoizedProps: { value: scopes }, return: null };
+        for (let i = 0; i < (side === 'left' ? 135 : 65); i++) fiber = { memoizedProps: {}, return: fiber };
+        composer.__reactFiber$fixture = fiber;
+        window[side + 'Scope'] = scope;
+        if (side === 'left') window.fixtureMainRow.setAttribute('data-app-action-sidebar-thread-id', 'local:' + clientThreadId);
+        else document.getElementById('right').setAttribute('data-tab-id', 'sidechat:' + id);
+        window.__codexThreadMetrics?.refresh();
+      };
+      window.fixtureCurrentBind('left', ids[2]); window.fixtureCurrentBind('right', ids[1]);
+    }, ids);
+    await page.evaluate(`(${installThreadMetrics.toString()})()`);
+    reads = []; await refreshThreadMetrics({ sessions: new Map([['window', session]]) }, reader);
+    assert.deepEqual(reads, [[ids[2]]], 'new-thread sidebar placeholders must resolve only to their own real composer ID');
+    assert.match(await rows('left').textContent(), /333 tok/);
+    assert.equal(await rows('right').count(), 0, 'a missing manager must not create a signal or fall back to another thread');
+    await page.evaluate(() => {
+      const link = document.createElement('link'); link.rel = 'modulepreload'; link.href = '/assets/app-initial-abc123.js'; document.head.append(link);
+      window.__codexThreadMetrics.refresh();
+    });
+    await page.evaluate(id => window.fixtureCurrentBind('right', id), ids[0]);
+    releaseModule();
+    await page.waitForFunction(() => window.__codexThreadMetrics.status().panes.some(p => p.source === 'client-memory' && p.ok));
+    assert.match(await rows('right').textContent(), /111 tok/, 'async module loading must use the current pane binding');
+    assert.doesNotMatch(await rows('right').textContent(), /222 tok/);
+    assert.match(await rows('left').textContent(), /333 tok/);
+    for (const fault of ['client-id-mismatch', 'wrong-kind', 'wrong-placement', 'uuid-conflict', 'remote-sidebar', 'remote-composer', 'ambiguous-scope']) {
+      await page.evaluate(({ fault, other }) => {
+        const scope = window.leftScope;
+        if (fault === 'client-id-mismatch') scope.value.clientThreadId = 'client-new-thread:' + other;
+        if (fault === 'wrong-kind') scope.value.kind = 'remote';
+        if (fault === 'wrong-placement') scope.value.placement = 'side';
+        if (fault === 'uuid-conflict') window.fixtureMainRow.setAttribute('data-app-action-sidebar-thread-id', 'local:' + other);
+        if (fault === 'remote-sidebar') window.fixtureMainRow.setAttribute('data-app-action-sidebar-thread-host-id', 'remote');
+        if (fault === 'remote-composer') document.querySelector('#left .composer-parent').__reactProps$fixture.children[0].props.hostId = 'remote';
+        if (fault === 'ambiguous-scope') {
+          let fiber = document.querySelector('#left [data-composer-surface-variant]').__reactFiber$fixture;
+          while (fiber.return) fiber = fiber.return;
+          fiber.memoizedProps.value.set('duplicate', { ...scope });
+        }
+        window.__codexThreadMetrics.refresh();
+      }, { fault, other: ids[0] });
+      assert.equal(await rows('left').count(), 0, fault); assert.match(await rows('right').textContent(), /111 tok/, fault);
+      await page.evaluate(id => { window.fixtureMainRow.setAttribute('data-app-action-sidebar-thread-host-id', 'local'); window.fixtureCurrentBind('left', id); }, ids[2]); await put(ids[2]);
+    }
+    for (const fault of ['missing-family', 'missing-local', 'wrong-token', 'wrong-scope', 'remote-record']) {
+      await page.evaluate(({ fault, id }) => {
+        const root = window.fixtureRoot;
+        if (fault === 'missing-family') root.familyBindings.delete(window.fixtureFamily);
+        if (fault === 'missing-local') root.familyBindings.get(window.fixtureFamily).delete('local');
+        if (fault === 'wrong-token') root.token = {};
+        if (fault === 'wrong-scope') window.rightScope.value.placement = 'main';
+        if (fault === 'remote-record') window.fixtureRecords.get(id).hostId = 'remote';
+        window.__codexThreadMetrics.refresh();
+      }, { fault, id: ids[0] });
+      assert.equal(await rows('right').count(), 0, fault); assert.match(await rows('left').textContent(), /333 tok/, fault);
+      await page.evaluate(id => {
+        window.fixtureRoot.token = window.fixtureFamily.scope;
+        window.fixtureRoot.familyBindings.set(window.fixtureFamily, new Map([['local', window.fixtureMember]]));
+        window.fixtureRecords.set(id, window.fixtureRecord(id)); window.fixtureCurrentBind('right', id);
+      }, ids[0]);
+    }
+    await button('right', 1).click(); assert.match(await (await panel('right')).textContent(), /111 tok/);
+    await page.evaluate(id => { window.fixtureCurrentBind('left', id); window.__codexThreadMetrics.refresh(); }, ids[1]); await put(ids[1]);
+    assert.match(await rows('left').textContent(), /222 tok/); assert.match(await rows('right').textContent(), /111 tok/);
+    assert.equal(await button('right', 1).getAttribute('aria-expanded'), 'true');
+    reads = []; await refreshThreadMetrics({ sessions: new Map([['window', session]]) }, reader);
+    assert.deepEqual(reads, [[ids[1]]], 'new-client ephemeral panes must still avoid the local DB');
+    await page.evaluate(id => { window.fixtureRecords.get(id).ephemeral = false; window.__codexThreadMetrics.refresh(); }, ids[0]);
+    reads = []; await refreshThreadMetrics({ sessions: new Map([['window', session]]) }, reader);
+    assert.deepEqual(reads, [[ids[1], ids[0]]], 'new-client persistent side chats must read their own logs');
+    assert.ok(await page.evaluate(() => window.fixtureManagerReads > 0));
+    await page.evaluate(() => { window.__codexThreadMetrics.destroy(); document.querySelector('link[rel="modulepreload"]').remove(); });
+    let releaseDestroyed;
+    const destroyedModule = new Promise(resolve => { releaseDestroyed = resolve; });
+    await page.route('http://codex.test/assets/app-initial-def456.js', async route => {
+      await destroyedModule;
+      await route.fulfill({ contentType: 'application/javascript', body: 'export const cCn=window.fixtureFamily; window.fixtureModuleLoaded=2;' });
+    });
+    await page.evaluate(() => { const link = document.createElement('link'); link.rel = 'modulepreload'; link.href = '/assets/app-initial-def456.js'; document.head.append(link); });
+    await page.evaluate(`(${installThreadMetrics.toString()})()`);
+    await page.evaluate(() => window.__codexThreadMetrics.destroy()); releaseDestroyed();
+    await page.waitForFunction(() => window.fixtureModuleLoaded === 2);
+    assert.equal(await page.locator('[data-codex-thread-metrics],#codex-thread-metrics-style').count(), 0, 'late imports must not resurrect a destroyed UI');
     assert.deepEqual(errors, []);
-    console.log('PASS two-pane accounting, per-pane current identity, same-DOM switch races, shared reads/cache, local failure, private-field boundaries, fixed details, unique ARIA, Escape ownership and cleanup');
+    console.log('PASS current-client new-thread identities, cached manager, async lifecycle, two-pane accounting, per-pane current identity, same-DOM switch races, shared reads/cache, local failure, private-field boundaries, fixed details, unique ARIA, Escape ownership and cleanup');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
